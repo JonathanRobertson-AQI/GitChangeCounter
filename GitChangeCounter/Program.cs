@@ -226,6 +226,26 @@ table.AddRow(
 AnsiConsole.Write(table);
 AnsiConsole.MarkupLine($"\n[grey]Date range: {startMonth:D2}/01 – end of month {endMonth:D2}[/]");
 
+// ── Save CSV ───────────────────────────────────────────────────────────────
+string timestamp  = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+string csvPath    = Path.Combine(rootFolder, $"git-stats_{timestamp}.csv");
+
+var csv = new System.Text.StringBuilder();
+csv.AppendLine($"Repository,{yearA} Added,{yearA} Deleted,{yearB} Added,{yearB} Deleted,Delta Added,Delta Deleted,Pull Warning");
+
+foreach (var r in sorted)
+{
+    long deltaAdd = r.AddedB - r.AddedA;
+    long deltaDel = r.DeletedB - r.DeletedA;
+    bool warn     = pullFailures.ContainsKey(r.Name);
+    csv.AppendLine($"{r.Name},{r.AddedA},{r.DeletedA},{r.AddedB},{r.DeletedB},{deltaAdd},{deltaDel},{(warn ? "⚠ pull failed" : "")}");
+}
+
+csv.AppendLine($"TOTAL,{totalAddA},{totalDelA},{totalAddB},{totalDelB},{totalAddB - totalAddA},{totalDelB - totalDelA},");
+
+await File.WriteAllTextAsync(csvPath, csv.ToString());
+AnsiConsole.MarkupLine($"[grey]Results saved to:[/] [cyan]{csvPath}[/]");
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 static async Task<(long added, long deleted)> GetStats(string repoPath, string since, string until)
 {
