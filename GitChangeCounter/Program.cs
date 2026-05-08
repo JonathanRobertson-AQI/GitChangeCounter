@@ -40,7 +40,8 @@ AnsiConsole.MarkupLine($"\nFound [cyan]{repoDirs.Count}[/] repositories.");
 // ── Optional: pull latest ──────────────────────────────────────────────────
 bool doPull = AnsiConsole.Confirm("Pull latest for all repos before counting?", defaultValue: true);
 
-var pullFailures = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
+var pullFailures  = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
+var branchChanges = new List<(string Repo, string Before, string After, bool Failed)>();
 
 if (doPull)
 {
@@ -62,6 +63,11 @@ if (doPull)
                 string name = Path.GetFileName(repoPath);
                 pullTask.Description = $"[blue]Pulling[/] {Markup.Escape(name)}";
 
+                // Capture branch before any changes
+                var (_, branchBefore) = await RunGitAsync(repoPath,
+                    "branch --show-current", captureStdout: true);
+                branchBefore = branchBefore.Trim();
+
                 // Detect whether the repo uses "main" or "master"
                 string? defaultBranch = null;
                 foreach (var candidate in new[] { "main", "master" })
@@ -74,6 +80,7 @@ if (doPull)
                 if (defaultBranch is null)
                 {
                     pullFailures[name] = "Could not find a 'main' or 'master' branch.";
+                    branchChanges.Add((name, branchBefore, "?", Failed: true));
                     pullTask.Increment(1);
                     continue;
                 }
@@ -84,6 +91,7 @@ if (doPull)
                 if (checkoutCode != 0)
                 {
                     pullFailures[name] = $"checkout {defaultBranch}: {checkoutErr.Trim()}";
+                    branchChanges.Add((name, branchBefore, defaultBranch, Failed: true));
                     pullTask.Increment(1);
                     continue;
                 }
@@ -92,14 +100,47 @@ if (doPull)
                 if (exitCode != 0)
                     pullFailures[name] = stderr.Trim();
 
+                // Capture branch after checkout + pull
+                var (_, branchAfter) = await RunGitAsync(repoPath,
+                    "branch --show-current", captureStdout: true);
+
+                branchChanges.Add((name, branchBefore, branchAfter.Trim(),
+                    Failed: pullFailures.ContainsKey(name)));
+
                 pullTask.Increment(1);
             }
 
             pullTask.Description = "[blue]Pull complete[/]";
         });
 
+    // Print branch summary table
+    AnsiConsole.MarkupLine("");
+    var branchTable = new Table()
+        .Border(TableBorder.Rounded)
+        .AddColumn(new TableColumn("[white]Repository[/]"))
+        .AddColumn(new TableColumn("[grey]Branch Before[/]").Centered())
+        .AddColumn(new TableColumn("[grey]→[/]").Centered())
+        .AddColumn(new TableColumn("[grey]Branch After[/]").Centered())
+        .AddColumn(new TableColumn("[grey]Status[/]").Centered());
+
+    foreach (var (repo, before, after, failed) in branchChanges.OrderBy(b => b.Repo))
+    {
+        bool switched  = before != after;
+        string beforeCell = switched ? $"[yellow]{Markup.Escape(before)}[/]" : Markup.Escape(before);
+        string afterCell  = failed  ? $"[red]{Markup.Escape(after)}[/]"
+                          : switched ? $"[green]{Markup.Escape(after)}[/]"
+                          :            Markup.Escape(after);
+        string status     = failed  ? "[red]✗ failed[/]"
+                          : switched ? "[yellow]switched[/]"
+                          :            "[grey]ok[/]";
+
+        branchTable.AddRow(Markup.Escape(repo), beforeCell, "→", afterCell, status);
+    }
+
+    AnsiConsole.Write(branchTable);
+
     if (pullFailures.Count > 0)
-        AnsiConsole.MarkupLine($"[yellow]⚠ {pullFailures.Count} repo(s) could not be pulled (shown in table).[/]");
+        AnsiConsole.MarkupLine($"\n[yellow]⚠ {pullFailures.Count} repo(s) could not be pulled (shown in stats table).[/]");
 }
 
 AnsiConsole.MarkupLine("");
