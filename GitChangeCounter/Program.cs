@@ -62,6 +62,32 @@ if (doPull)
                 string name = Path.GetFileName(repoPath);
                 pullTask.Description = $"[blue]Pulling[/] {Markup.Escape(name)}";
 
+                // Detect whether the repo uses "main" or "master"
+                string? defaultBranch = null;
+                foreach (var candidate in new[] { "main", "master" })
+                {
+                    var (rc, _) = await RunGitAsync(repoPath,
+                        $"rev-parse --verify refs/heads/{candidate}");
+                    if (rc == 0) { defaultBranch = candidate; break; }
+                }
+
+                if (defaultBranch is null)
+                {
+                    pullFailures[name] = "Could not find a 'main' or 'master' branch.";
+                    pullTask.Increment(1);
+                    continue;
+                }
+
+                // Checkout the default branch before pulling
+                var (checkoutCode, checkoutErr) = await RunGitAsync(repoPath,
+                    $"checkout {defaultBranch}");
+                if (checkoutCode != 0)
+                {
+                    pullFailures[name] = $"checkout {defaultBranch}: {checkoutErr.Trim()}";
+                    pullTask.Increment(1);
+                    continue;
+                }
+
                 var (exitCode, stderr) = await RunGitAsync(repoPath, "pull --ff-only");
                 if (exitCode != 0)
                     pullFailures[name] = stderr.Trim();
