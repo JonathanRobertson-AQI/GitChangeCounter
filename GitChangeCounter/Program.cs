@@ -96,7 +96,8 @@ if (doPull)
                     continue;
                 }
 
-                var (exitCode, stderr) = await RunGitAsync(repoPath, "pull --ff-only");
+                var (exitCode, stderr) = await RunGitAsync(repoPath, "pull --ff-only",
+                    timeoutSeconds: 60);
                 if (exitCode != 0)
                     pullFailures[name] = stderr.Trim();
 
@@ -252,7 +253,8 @@ static async Task<(long added, long deleted)> GetStats(string repoPath, string s
 }
 
 static async Task<(int exitCode, string output)> RunGitAsync(
-    string repoPath, string arguments, bool captureStdout = false)
+    string repoPath, string arguments, bool captureStdout = false,
+    int timeoutSeconds = 30)
 {
     var psi = new ProcessStartInfo("git")
     {
@@ -265,11 +267,25 @@ static async Task<(int exitCode, string output)> RunGitAsync(
     };
 
     using var process = Process.Start(psi)!;
-    string stdout = await process.StandardOutput.ReadToEndAsync();
-    string stderr = await process.StandardError.ReadToEndAsync();
-    await process.WaitForExitAsync();
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
 
-    return (process.ExitCode, captureStdout ? stdout : stderr);
+    try
+    {
+        // Read stdout and stderr concurrently to avoid deadlocks on full buffers
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(cts.Token);
+        var stderrTask = process.StandardError.ReadToEndAsync(cts.Token);
+
+        await process.WaitForExitAsync(cts.Token);
+
+        string stdout = await stdoutTask;
+        string stderr = await stderrTask;
+        return (process.ExitCode, captureStdout ? stdout : stderr);
+    }
+    catch (OperationCanceledException)
+    {
+        try { process.Kill(entireProcessTree: true); } catch { /* already exited */ }
+        return (-1, $"Timed out after {timeoutSeconds}s");
+    }
 }
 
 static string DeltaMarkup(long delta) =>
