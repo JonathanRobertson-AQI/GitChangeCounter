@@ -35,7 +35,48 @@ if (repoDirs.Count == 0)
     return;
 }
 
-AnsiConsole.MarkupLine($"\nFound [cyan]{repoDirs.Count}[/] repositories. Gathering stats...\n");
+AnsiConsole.MarkupLine($"\nFound [cyan]{repoDirs.Count}[/] repositories.");
+
+// ── Optional: pull latest ──────────────────────────────────────────────────
+bool doPull = AnsiConsole.Confirm("Pull latest for all repos before counting?", defaultValue: true);
+
+var pullFailures = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
+
+if (doPull)
+{
+    AnsiConsole.MarkupLine("");
+    await AnsiConsole.Progress()
+        .AutoRefresh(true)
+        .Columns(
+            new TaskDescriptionColumn(),
+            new ProgressBarColumn(),
+            new PercentageColumn(),
+            new SpinnerColumn())
+        .StartAsync(async ctx =>
+        {
+            var pullTask = ctx.AddTask("[blue]Pulling repos[/]", maxValue: repoDirs.Count);
+
+            // Sequential: git pull can prompt for credentials or lock the index
+            foreach (var repoPath in repoDirs)
+            {
+                string name = Path.GetFileName(repoPath);
+                pullTask.Description = $"[blue]Pulling[/] {Markup.Escape(name)}";
+
+                var (exitCode, stderr) = await RunGitAsync(repoPath, "pull --ff-only");
+                if (exitCode != 0)
+                    pullFailures[name] = stderr.Trim();
+
+                pullTask.Increment(1);
+            }
+
+            pullTask.Description = "[blue]Pull complete[/]";
+        });
+
+    if (pullFailures.Count > 0)
+        AnsiConsole.MarkupLine($"[yellow]⚠ {pullFailures.Count} repo(s) could not be pulled (shown in table).[/]");
+}
+
+AnsiConsole.MarkupLine("");
 
 // ── Gather stats ───────────────────────────────────────────────────────────
 var results = new System.Collections.Concurrent.ConcurrentBag<RepoStats>();
@@ -88,8 +129,13 @@ foreach (var r in sorted)
     long deltaAdd = r.AddedB  - r.AddedA;
     long deltaDel = r.DeletedB - r.DeletedA;
 
+    bool hasPullError = pullFailures.ContainsKey(r.Name);
+    string nameCell = hasPullError
+        ? $"[yellow]⚠ {Markup.Escape(r.Name)}[/]"
+        : Markup.Escape(r.Name);
+
     table.AddRow(
-        Markup.Escape(r.Name),
+        nameCell,
         $"[green]{r.AddedA:N0}[/]",
         $"[red]{r.DeletedA:N0}[/]",
         $"[green]{r.AddedB:N0}[/]",
@@ -115,19 +161,9 @@ AnsiConsole.MarkupLine($"\n[grey]Date range: {startMonth:D2}/01 – end of month
 // ── Helpers ────────────────────────────────────────────────────────────────
 static async Task<(long added, long deleted)> GetStats(string repoPath, string since, string until)
 {
-    var psi = new ProcessStartInfo("git")
-    {
-        Arguments = $"log --since={since} --until={until} --pretty=tformat: --numstat",
-        WorkingDirectory = repoPath,
-        RedirectStandardOutput = true,
-        RedirectStandardError = true,
-        UseShellExecute = false,
-        CreateNoWindow = true
-    };
-
-    using var process = Process.Start(psi)!;
-    string output = await process.StandardOutput.ReadToEndAsync();
-    await process.WaitForExitAsync();
+    var (_, output) = await RunGitAsync(repoPath,
+        $"log --since={since} --until={until} --pretty=tformat: --numstat",
+        captureStdout: true);
 
     long added = 0, deleted = 0;
 
@@ -146,6 +182,27 @@ static async Task<(long added, long deleted)> GetStats(string repoPath, string s
     }
 
     return (added, deleted);
+}
+
+static async Task<(int exitCode, string output)> RunGitAsync(
+    string repoPath, string arguments, bool captureStdout = false)
+{
+    var psi = new ProcessStartInfo("git")
+    {
+        Arguments = arguments,
+        WorkingDirectory = repoPath,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+        CreateNoWindow = true
+    };
+
+    using var process = Process.Start(psi)!;
+    string stdout = await process.StandardOutput.ReadToEndAsync();
+    string stderr = await process.StandardError.ReadToEndAsync();
+    await process.WaitForExitAsync();
+
+    return (process.ExitCode, captureStdout ? stdout : stderr);
 }
 
 static string DeltaMarkup(long delta) =>
